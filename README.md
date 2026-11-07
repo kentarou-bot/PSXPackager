@@ -168,6 +168,18 @@ Extracting from Multi-disc PBPs are supported. Specify the discs to extract with
 psxpackager -i <path_to_pbp> [-o <output_path>] [-d <list_of_discs>]
 ```
 
+## PbpExtract (framework-dependent, read-only)
+
+`PbpExtract` is a small command that only decompresses a plain popstation PBP to BIN/CUE. It is published as a managed DLL and is run by the installed .NET runtime (`dotnet PbpExtract.dll`). It does not ship a native apphost.
+
+The input file is opened read-only. Official PSOne Classics packages that carry a PGD marker in `DATA.PSAR` are refused. Those images are protected; this tool does not decrypt them and does not pad or rebuild sectors to match an external checksum.
+
+```
+dotnet PbpExtract.dll --input <file.pbp> --output <directory>
+```
+
+On a Mac, install the signed Microsoft .NET 10 runtime for Arm64 and run the DLL with `dotnet`. A `.extract.txt` file next to the BIN records sizes and MD5/SHA-256 hashes of the recovered bytes, including per-track spans.
+
 ## Filename formatting
 
 Use the `-f` or `format` option to specify the format of the output filename based on the information found on the disc (Sony GameID) and the `gameInfo.db` file.

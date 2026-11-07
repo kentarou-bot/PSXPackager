@@ -35,6 +35,12 @@ namespace Popstation.Pbp
         public int Index { get; }
         public string DiscID { get; }
 
+        /// <summary>
+        /// Disc length in sectors from the TOC lead-out (A2), when that entry parsed.
+        /// This is the image length the packer stored, including audio past the ISO volume.
+        /// </summary>
+        public int? LeadOutSectors { get; private set; }
+
         public PbpDiscEntry(Stream stream, int psarOffset, int index)
         {
             this.stream = stream;
@@ -84,8 +90,7 @@ namespace Popstation.Pbp
                 int mm = TOCHelper.FromBinaryDecimal(buffer[7]);
                 int ss = TOCHelper.FromBinaryDecimal(buffer[8]);
                 int ff = TOCHelper.FromBinaryDecimal(buffer[9]);
-                //var frames = mm * 60 * 75 + ss * 75 + ff;
-                //var size = 2352 * frames;
+                LeadOutSectors = (mm * 60 + ss) * 75 + ff;
 
                 for (var c = startTrack; c <= endTrack; c++)
                 {
