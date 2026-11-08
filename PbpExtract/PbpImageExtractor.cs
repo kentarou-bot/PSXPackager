@@ -136,7 +136,7 @@ public sealed class PbpImageExtractor
                 $"Disc {disc.Index} image length {imageLength} is not a multiple of {SectorSize}. Nothing was written.");
         }
 
-        var spans = BuildTrackSpans(disc.TOC, imageLength, out var usedPregap);
+        var spans = AdjustBoundaryFromSectorSync(disc, BuildTrackSpans(disc.TOC, imageLength, out var usedPregap), available);
         EnsureNotSource(sourcePath, binPath, cuePath, reportPath);
         EnsureCanWrite(overwrite, binPath, cuePath, reportPath);
         var partial = binPath + ".partial";
@@ -297,7 +297,7 @@ public sealed class PbpImageExtractor
         long available,
         long claimed)
     {
-        var spans = BuildTrackSpans(disc.TOC, claimed, out var usedPregap);
+        var spans = AdjustBoundaryFromSectorSync(disc, BuildTrackSpans(disc.TOC, claimed, out var usedPregap), available);
         var directory = Path.GetDirectoryName(mergedBinPath) ?? ".";
         var stem = Path.GetFileNameWithoutExtension(mergedBinPath);
         var outputs = new List<string>();
@@ -521,6 +521,124 @@ public sealed class PbpImageExtractor
         }
 
         File.WriteAllText(cuePath, builder.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+    }
+
+    internal readonly record struct BoundaryDecision(long EndSector, bool Moved, string Warning);
+
+    /// <summary>
+    /// The audio pregap belongs to the following track. A data track ends at the first sector
+    /// that is not Mode 2. When the TOC lead-in origin and the raw pregap MSF disagree by
+    /// exactly 150 frames, the sync pattern picks the boundary. Otherwise the TOC file offset stands.
+    /// </summary>
+    internal static BoundaryDecision ResolveDataAudioBoundary(
+        long tocFileSector,
+        long rawPregapSector,
+        long availableSectors,
+        Func<long, bool> isMode2)
+    {
+        if (rawPregapSector <= tocFileSector || rawPregapSector - tocFileSector != StandardPregapFrames)
+        {
+            return new BoundaryDecision(tocFileSector, false, "");
+        }
+
+        if (tocFileSector < 0 || tocFileSector >= availableSectors || rawPregapSector > availableSectors)
+        {
+            return new BoundaryDecision(tocFileSector, false,
+                "A candidate track boundary is outside the stored sectors. Track 1 stays at the TOC file offset.");
+        }
+
+        var atToc = isMode2(tocFileSector);
+        var beforeRaw = isMode2(rawPregapSector - 1);
+        var atRaw = rawPregapSector < availableSectors && isMode2(rawPregapSector);
+        if (!atToc)
+        {
+            return new BoundaryDecision(tocFileSector, false,
+                "The TOC file offset is not a Mode 2 sector, so it is the data/audio split. The audio pregap belongs to the next track and was not added to track 1. This data span is 150 sectors shorter than the pregap MSF read as a raw file sector.");
+        }
+
+        if (beforeRaw && !atRaw)
+        {
+            return new BoundaryDecision(rawPregapSector, true,
+                "The 150-frame lead-in origin pointed at a Mode 2 sector. The sync pattern shows data continuing through the previous sector and a non-Mode-2 sector at the pregap MSF read as a file sector. Track 1 ends at that transition and does not include the audio pregap.");
+        }
+
+        if (atRaw)
+        {
+            return new BoundaryDecision(tocFileSector, false,
+                "Both the TOC file offset and the pregap MSF are still Mode 2 sectors. The boundary is ambiguous, so track 1 stays at the TOC file offset.");
+        }
+
+        return new BoundaryDecision(tocFileSector, false,
+            "Sector signatures between the TOC file offset and the pregap MSF do not show one Mode 2 to non-Mode-2 transition. Track 1 stays at the TOC file offset.");
+    }
+
+    internal static bool IsMode2DataSector(ReadOnlySpan<byte> sector)
+    {
+        if (sector.Length < 16 || sector[0] != 0x00 || sector[11] != 0x00 || sector[15] != 0x02)
+        {
+            return false;
+        }
+
+        for (var i = 1; i <= 10; i++)
+        {
+            if (sector[i] != 0xFF)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static List<TrackSpan> AdjustBoundaryFromSectorSync(PbpDiscEntry disc, IReadOnlyList<TrackSpan> spans, long availableBytes)
+    {
+        var adjusted = spans.ToList();
+        if (disc.TOC.Count < 2 || adjusted.Count < 2 || adjusted[0].Type != "data")
+        {
+            return adjusted;
+        }
+
+        var rawPregap = MsfToFrames(disc.TOC[1].PregapMinutes, disc.TOC[1].PregapSeconds, disc.TOC[1].PregapFrames, $"track {disc.TOC[1].TrackNo} pregap");
+        var tocSector = adjusted[1].Offset / SectorSize;
+        var decision = ResolveDataAudioBoundary(tocSector, rawPregap, availableBytes / SectorSize, sector =>
+            IsMode2DataSector(ReadSectorPrefix(disc, sector, 16)));
+        if (!decision.Moved && string.IsNullOrEmpty(decision.Warning))
+        {
+            return adjusted;
+        }
+
+        if (decision.Moved)
+        {
+            var newEnd = decision.EndSector * SectorSize;
+            var track2End = adjusted[1].Offset + adjusted[1].Length;
+            adjusted[0] = adjusted[0] with
+            {
+                Length = newEnd - adjusted[0].Offset,
+                Note = adjusted[0].Note + " " + decision.Warning
+            };
+            adjusted[1] = adjusted[1] with
+            {
+                Offset = newEnd,
+                Length = track2End - newEnd,
+                Note = adjusted[1].Note + " " + decision.Warning
+            };
+        }
+        else
+        {
+            adjusted[0] = adjusted[0] with { Note = adjusted[0].Note + " " + decision.Warning };
+        }
+
+        return adjusted;
+    }
+
+    private static byte[] ReadSectorPrefix(PbpDiscEntry disc, long sector, int count)
+    {
+        var buffer = new byte[count];
+        using var md5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
+        using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        using var stream = new MemoryStream(buffer);
+        CopyRange(disc, sector * SectorSize, count, stream, md5, sha);
+        return buffer;
     }
 
     internal static int MsfToFrames(int minutes, int seconds, int frames, string what)

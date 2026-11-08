@@ -172,6 +172,136 @@ public class PbpExtractTests
     }
 
     [TestMethod]
+    public void Mode2TransitionAtTheRawPregapEndsTheDataTrackThere()
+    {
+        var decision = PbpImageExtractor.ResolveDataAudioBoundary(228870, 229020, 247872, sector => sector < 229020);
+
+        Assert.IsTrue(decision.Moved);
+        Assert.AreEqual(229020, decision.EndSector);
+    }
+
+    [TestMethod]
+    public void AudioAtTheTocBoundaryIsNotAppendedToTrack1()
+    {
+        var decision = PbpImageExtractor.ResolveDataAudioBoundary(228870, 229020, 247872, _ => false);
+
+        Assert.IsFalse(decision.Moved);
+        Assert.AreEqual(228870, decision.EndSector);
+        StringAssert.Contains(decision.Warning, "not a Mode 2");
+    }
+
+    [TestMethod]
+    public void AmbiguousMode2CandidatesStayOnTheTocOffset()
+    {
+        var decision = PbpImageExtractor.ResolveDataAudioBoundary(228870, 229020, 247872, _ => true);
+
+        Assert.IsFalse(decision.Moved);
+        StringAssert.Contains(decision.Warning, "ambiguous");
+    }
+
+    [TestMethod]
+    public void PackedImageUsesTheSyncTransitionWhenTheLeadInPointsIntoData()
+    {
+        using var workspace = new Workspace();
+        const int dataSectors = 200;
+        const int audioSectors = 40;
+        var image = BuildSplitImage(dataSectors, audioSectors);
+        var pbp = workspace.Pack(image, 0, OneTrackCueWithAudio(dataSectors));
+        PatchTrackTimes(pbp, dataSectors, dataSectors + 150);
+
+        var report = new PbpImageExtractor().Extract(pbp, Path.Combine(workspace.Root, "sync"), false, null);
+        var track1 = report.Discs.Single().Tracks.Single(track => track.Number == 1);
+
+        Assert.AreEqual(0, track1.Offset);
+        Assert.AreEqual((long)dataSectors * SectorSize, track1.Length);
+        Assert.AreEqual(Hash(image.AsSpan(0, dataSectors * SectorSize).ToArray(), MD5.Create()), track1.Md5);
+        StringAssert.Contains(track1.Note, "does not include the audio pregap");
+        Assert.AreNotEqual(0x00, image[dataSectors * SectorSize]);
+    }
+
+    private static string OneTrackCueWithAudio(int dataSectors)
+    {
+        var index = dataSectors + 150;
+        var minutes = index / (75 * 60);
+        var rest = index % (75 * 60);
+        var seconds = rest / 75;
+        var frames = rest % 75;
+        return $"""
+            FILE "disc.bin" BINARY
+              TRACK 01 MODE2/2352
+                INDEX 01 00:00:00
+              TRACK 02 AUDIO
+                INDEX 01 {minutes:00}:{seconds:00}:{frames:00}
+            """;
+    }
+
+    private static byte[] BuildSplitImage(int dataSectors, int audioSectors)
+    {
+        var image = new byte[(dataSectors + audioSectors) * SectorSize];
+        for (var sector = 0; sector < dataSectors + audioSectors; sector++)
+        {
+            var offset = sector * SectorSize;
+            if (sector < dataSectors)
+            {
+                image[offset] = 0x00;
+                for (var i = 1; i <= 10; i++)
+                {
+                    image[offset + i] = 0xFF;
+                }
+
+                image[offset + 11] = 0x00;
+                image[offset + 15] = 0x02;
+                image[offset + 24] = 0x5A;
+            }
+            else
+            {
+                image[offset] = 0x11;
+                image[offset + 24] = 0xA1;
+            }
+        }
+
+        var pvd = 16 * SectorSize + 24;
+        image[pvd] = 0x01;
+        Encoding.ASCII.GetBytes("CD001").CopyTo(image, pvd + 1);
+        image[pvd + 6] = 0x01;
+        image[pvd + 80] = (byte)dataSectors;
+        image[pvd + 81] = (byte)(dataSectors >> 8);
+        return image;
+    }
+
+    private static void PatchTrackTimes(string path, int pregapFrames, int userFrames)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var toc = BitConverter.ToInt32(bytes, 0x24) + 0x800;
+        var track1 = toc + 30;
+        bytes[track1] = 0x41;
+        bytes[track1 + 1] = 0x00;
+        bytes[track1 + 2] = 0x01;
+        WriteMsf(bytes, track1 + 3, 151);
+        bytes[track1 + 6] = 0x00;
+        WriteMsf(bytes, track1 + 7, 150);
+        var track2 = toc + 40;
+        bytes[track2] = 0x01;
+        bytes[track2 + 1] = 0x00;
+        bytes[track2 + 2] = 0x02;
+        WriteMsf(bytes, track2 + 3, pregapFrames);
+        bytes[track2 + 6] = 0x00;
+        WriteMsf(bytes, track2 + 7, userFrames);
+        File.WriteAllBytes(path, bytes);
+    }
+
+    private static void WriteMsf(byte[] bytes, int offset, int frames)
+    {
+        var minutes = frames / (75 * 60);
+        var remainder = frames % (75 * 60);
+        var seconds = remainder / 75;
+        var frame = remainder % 75;
+        bytes[offset] = Bcd(minutes);
+        bytes[offset + 1] = Bcd(seconds);
+        bytes[offset + 2] = Bcd(frame);
+    }
+
+    [TestMethod]
     public void MeasuredTailGapIsNotPopstationBlockPadding()
     {
         const long leadOut = 583331280;
