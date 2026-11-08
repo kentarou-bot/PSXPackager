@@ -25,6 +25,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TestHarness", "TestHarness\
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PSXPackager.Audio", "PSXPackager.Audio\PSXPackager.Audio.csproj", "{71CA2456-0A74-4D28-9392-6FC1D7170637}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "PbpExtract", "PbpExtract\PbpExtract.csproj", "{5EE964E1-874B-48A2-96F3-41D7D09D6164}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -75,6 +77,10 @@ Global
 		{71CA2456-0A74-4D28-9392-6FC1D7170637}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{71CA2456-0A74-4D28-9392-6FC1D7170637}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{71CA2456-0A74-4D28-9392-6FC1D7170637}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5EE964E1-874B-48A2-96F3-41D7D09D6164}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5EE964E1-874B-48A2-96F3-41D7D09D6164}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5EE964E1-874B-48A2-96F3-41D7D09D6164}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5EE964E1-874B-48A2-96F3-41D7D09D6164}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="../psxpackager.props" />
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>PbpExtract</AssemblyName>
+    <RootNamespace>PbpExtract</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Framework-dependent IL only. The signed Microsoft dotnet host runs this DLL.
+         UseAppHost=false keeps an unsigned native apphost out of the publish folder. -->
+    <UseAppHost>false</UseAppHost>
+    <SelfContained>false</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <!-- A machine with only the current .NET 10 runtime can run this net8.0 assembly. -->
+    <RollForward>Major</RollForward>
+    <Description>Read-only extractor for plain popstation PBP disc images.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="PSXPackager.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Popstation\Popstation.csproj" />
+    <ProjectReference Include="..\PSXPackager.Common\PSXPackager.Common.csproj" />
+  </ItemGroup>
+
+  <!-- Popstation copies packer templates (icons, BASE.PBP, a MIPS DATA.PSP, KEYS.BIN).
+       Extraction does not read them, so they stay out of this publish folder. -->
+  <Target Name="RemovePackerTemplatesFromPublish" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="$([System.String]::Copy('%(RelativePath)').StartsWith('Resources'))" />
+    </ItemGroup>
+  </Target>
+</Project>
