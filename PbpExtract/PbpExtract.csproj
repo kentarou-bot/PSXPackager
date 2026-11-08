@@ -21,6 +21,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="PSXPackager.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Popstation\Popstation.csproj" />
     <ProjectReference Include="..\PSXPackager.Common\PSXPackager.Common.csproj" />
   </ItemGroup>

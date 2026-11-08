@@ -3,6 +3,7 @@ using System.Text;
 using Popstation;
 using Popstation.Pbp;
 using PbpExtract;
+using PSXPackager.Common;
 
 namespace UnitTestProject;
 
@@ -116,6 +117,58 @@ public class PbpExtractTests
         CollectionAssert.AreEqual(before, File.ReadAllBytes(pbp));
         CollectionAssert.AreEqual(image, File.ReadAllBytes(Path.Combine(output, "disc.bin")));
         StringAssert.Contains(stdout, "source-unchanged: True");
+    }
+
+    [TestMethod]
+    public void StockFirstTrackMarkerIsNotAByteOffset()
+    {
+        Assert.AreEqual(151, PbpImageExtractor.MsfToFrames(0, 2, 1, "pregap"));
+        Assert.AreEqual(150, PbpImageExtractor.MsfToFrames(0, 2, 0, "user"));
+        Assert.AreEqual(229020, PbpImageExtractor.MsfToFrames(50, 53, 45, "track2"));
+
+        // Bytes 3-5 are 00:02:01 and bytes 7-9 are 00:02:00, the stock first-track record.
+        // Track 2's pregap is 50:53:45 and its user time is two seconds later.
+        // The on-file boundary is 229020 - 150, not 229020, and track 1 starts at sector 0.
+        var spans = PbpImageExtractor.BuildTrackSpans(new List<TOCEntry>
+        {
+            Toc(1, TrackTypeEnum.Data, 0, 2, 1, 0, 2, 0),
+            Toc(2, TrackTypeEnum.Audio, 50, 53, 45, 50, 55, 45)
+        }, 248015L * SectorSize, out _);
+
+        Assert.AreEqual(0, spans[0].Offset);
+        Assert.AreEqual(228870L * SectorSize, spans[0].Length);
+        Assert.AreEqual(228870L * SectorSize, spans[1].Offset);
+    }
+
+    [TestMethod]
+    public void ZeroUserDataOriginUsesThePregapFrameCountAsTheFileBoundary()
+    {
+        // User MSF 00:00:00 is before pregap 00:02:01, so the track-1 origin is 0.
+        // Track 2 then begins at its pregap frame count, 229020 sectors.
+        var spans = PbpImageExtractor.BuildTrackSpans(new List<TOCEntry>
+        {
+            Toc(1, TrackTypeEnum.Data, 0, 2, 1, 0, 0, 0),
+            Toc(2, TrackTypeEnum.Audio, 50, 53, 45, 50, 55, 45)
+        }, 248015L * SectorSize, out _);
+
+        Assert.AreEqual(0, spans[0].Offset);
+        Assert.AreEqual(229020L * SectorSize, spans[0].Length);
+        Assert.AreEqual(538655040L, spans[0].Length);
+    }
+
+    private static TOCEntry Toc(int number, TrackTypeEnum type, int preMin, int preSec, int preFrame, int dataMin, int dataSec, int dataFrame)
+    {
+        return new TOCEntry
+        {
+            TrackNo = number,
+            TrackType = type,
+            PregapMinutes = preMin,
+            PregapSeconds = preSec,
+            PregapFrames = preFrame,
+            DataMinutes = dataMin,
+            DataSeconds = dataSec,
+            DataFrames = dataFrame
+        };
     }
 
     [TestMethod]

@@ -98,13 +98,22 @@ namespace Popstation.Pbp
                     var trackNo = TOCHelper.FromBinaryDecimal(buffer[2]);
                     if (trackNo != c) throw new Exception("Invalid TOC!");
 
+                    var raw = new byte[0xA];
+                    System.Buffer.BlockCopy(buffer, 0, raw, 0, 0xA);
                     var entry = new TOCEntry
                     {
                         TrackType = (TrackTypeEnum)buffer[0],
                         TrackNo = trackNo,
                         Minutes = TOCHelper.FromBinaryDecimal(buffer[3]),
                         Seconds = TOCHelper.FromBinaryDecimal(buffer[4]),
-                        Frames = TOCHelper.FromBinaryDecimal(buffer[5])
+                        Frames = TOCHelper.FromBinaryDecimal(buffer[5]),
+                        PregapMinutes = TOCHelper.FromBinaryDecimal(buffer[3]),
+                        PregapSeconds = TOCHelper.FromBinaryDecimal(buffer[4]),
+                        PregapFrames = TOCHelper.FromBinaryDecimal(buffer[5]),
+                        DataMinutes = TOCHelper.FromBinaryDecimal(buffer[7]),
+                        DataSeconds = TOCHelper.FromBinaryDecimal(buffer[8]),
+                        DataFrames = TOCHelper.FromBinaryDecimal(buffer[9]),
+                        RawRecord = raw
                     };
 
                     entries.Add(entry);

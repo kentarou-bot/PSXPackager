@@ -523,6 +523,22 @@ public sealed class PbpImageExtractor
         File.WriteAllText(cuePath, builder.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
     }
 
+    internal static int MsfToFrames(int minutes, int seconds, int frames, string what)
+    {
+        if (minutes < 0 || minutes > 99 || seconds < 0 || seconds > 59 || frames < 0 || frames > 74)
+        {
+            throw new PbpFormatException($"TOC {what} MSF {minutes:00}:{seconds:00}:{frames:00} is not a valid disc time.");
+        }
+
+        return (minutes * 60 + seconds) * 75 + frames;
+    }
+
+    /// <summary>
+    /// File-sector starts from a PBP TOC. Bytes 3-5 are the pregap MSF and bytes 7-9 are the
+    /// user-data MSF. Frame counts are the BCD time itself, with no extra 150-frame subtraction.
+    /// Track 1's 00:02:01 pregap is the stock marker and is not a stored prefix: the image begins
+    /// at file sector 0. A later track begins at its pregap frame count minus track 1's origin.
+    /// </summary>
     internal static IReadOnlyList<TrackSpan> BuildTrackSpans(IReadOnlyList<TOCEntry> toc, long imageLength, out bool usedStandardAudioPregap)
     {
         usedStandardAudioPregap = false;
@@ -534,63 +550,92 @@ public sealed class PbpImageExtractor
             };
         }
 
-        var starts = new long[toc.Count];
-        var notes = new string[toc.Count];
-        var audioFileIncludesPregap = new bool[toc.Count];
-        var pregapOk = true;
+        var imageSectors = imageLength / SectorSize;
+        var pregapFrames = new int[toc.Count];
+        var userFrames = new int[toc.Count];
         for (var i = 0; i < toc.Count; i++)
         {
-            var index01Frames = ((toc[i].Minutes * 60) + toc[i].Seconds) * 75 + toc[i].Frames;
-            var startFrames = (long)index01Frames;
-            var note = $"INDEX 01 is at {index01Frames} frames. Span starts at the TOC INDEX 01 position.";
-            if (toc[i].TrackType == TrackTypeEnum.Audio && index01Frames >= StandardPregapFrames)
-            {
-                startFrames = index01Frames - StandardPregapFrames;
-                note = $"INDEX 01 is at {index01Frames} frames. Span starts 150 frames (2 seconds) before TOC INDEX 01, which is the usual pregap stored in front of an audio track file.";
-                audioFileIncludesPregap[i] = true;
-            }
-
-            var start = startFrames * SectorSize;
-            if (start < 0 || start > imageLength)
-            {
-                pregapOk = false;
-                break;
-            }
-
-            starts[i] = start;
-            notes[i] = note;
+            pregapFrames[i] = MsfToFrames(toc[i].PregapMinutes, toc[i].PregapSeconds, toc[i].PregapFrames, $"track {toc[i].TrackNo} pregap");
+            userFrames[i] = MsfToFrames(toc[i].DataMinutes, toc[i].DataSeconds, toc[i].DataFrames, $"track {toc[i].TrackNo} user");
         }
 
-        if (!pregapOk || !IsStrictlyIncreasing(starts))
+        int track1Origin;
+        if (toc[0].TrackType != TrackTypeEnum.Audio && userFrames[0] < pregapFrames[0])
         {
-            usedStandardAudioPregap = false;
-            for (var i = 0; i < toc.Count; i++)
-            {
-                var index01Frames = ((toc[i].Minutes * 60) + toc[i].Seconds) * 75 + toc[i].Frames;
-                starts[i] = Math.Clamp(index01Frames * (long)SectorSize, 0, imageLength);
-                notes[i] = $"INDEX 01 is at {index01Frames} frames. Span starts at the TOC INDEX 01 position. The 2-second audio pregap assumption did not produce an ordered layout.";
-                audioFileIncludesPregap[i] = false;
-            }
+            // The stock first-track record is pregap 00:02:01 and user 00:02:00.
+            // User data is before that pregap marker, so the pregap is not stored in the image.
+            track1Origin = userFrames[0];
         }
         else
         {
-            usedStandardAudioPregap = toc.Any(entry => entry.TrackType == TrackTypeEnum.Audio);
+            if (userFrames[0] < pregapFrames[0])
+            {
+                throw new PbpFormatException(
+                    $"Track {toc[0].TrackNo} user MSF is before its pregap MSF. Nothing was written.");
+            }
+
+            track1Origin = userFrames[0] - pregapFrames[0];
         }
 
+        var fileStarts = new long[toc.Count];
+        var notes = new string[toc.Count];
+        var audioIncludesPregap = new bool[toc.Count];
+        fileStarts[0] = 0;
+        notes[0] = TocNote(toc[0], pregapFrames[0], userFrames[0], 0, track1Origin);
+        for (var i = 1; i < toc.Count; i++)
+        {
+            if (userFrames[i] < pregapFrames[i])
+            {
+                throw new PbpFormatException(
+                    $"Track {toc[i].TrackNo} user MSF is before its pregap MSF. Nothing was written.");
+            }
+
+            var fileStart = (long)pregapFrames[i] - track1Origin;
+            if (fileStart < 0)
+            {
+                throw new PbpFormatException(
+                    $"Track {toc[i].TrackNo} pregap falls before the start of the image. Nothing was written.");
+            }
+
+            fileStarts[i] = fileStart;
+            notes[i] = TocNote(toc[i], pregapFrames[i], userFrames[i], fileStart, track1Origin);
+            audioIncludesPregap[i] = toc[i].TrackType == TrackTypeEnum.Audio && userFrames[i] - pregapFrames[i] == StandardPregapFrames;
+        }
+
+        if (!IsStrictlyIncreasing(fileStarts) && toc.Count > 1)
+        {
+            throw new PbpFormatException("TOC track file offsets are not in order. Nothing was written.");
+        }
+
+        usedStandardAudioPregap = audioIncludesPregap.Any(flag => flag);
         var spans = new List<TrackSpan>(toc.Count);
         for (var i = 0; i < toc.Count; i++)
         {
-            var end = i + 1 < toc.Count ? starts[i + 1] : imageLength;
-            if (end < starts[i])
+            var end = i + 1 < toc.Count ? fileStarts[i + 1] : imageSectors;
+            if (end < fileStarts[i])
             {
-                end = starts[i];
+                end = fileStarts[i];
             }
 
             var type = toc[i].TrackType == TrackTypeEnum.Audio ? "audio" : "data";
-            spans.Add(new TrackSpan(toc[i].TrackNo, type, starts[i], end - starts[i], notes[i], audioFileIncludesPregap[i]));
+            spans.Add(new TrackSpan(
+                toc[i].TrackNo,
+                type,
+                fileStarts[i] * SectorSize,
+                (end - fileStarts[i]) * SectorSize,
+                notes[i],
+                audioIncludesPregap[i]));
         }
 
         return spans;
+    }
+
+    private static string TocNote(TOCEntry entry, int pregapFrames, int userFrames, long fileSector, int track1Origin)
+    {
+        var raw = entry.RawRecord == null ? "" : " raw=" + Convert.ToHexString(entry.RawRecord).ToLowerInvariant();
+        return $"pregap {entry.PregapMinutes:00}:{entry.PregapSeconds:00}:{entry.PregapFrames:00} ({pregapFrames} frames), " +
+               $"user {entry.DataMinutes:00}:{entry.DataSeconds:00}:{entry.DataFrames:00} ({userFrames} frames), " +
+               $"file-sector {fileSector}, track1-origin {track1Origin}.{raw}";
     }
 
     private static bool IsStrictlyIncreasing(long[] starts)
@@ -694,7 +739,8 @@ public sealed class PbpImageExtractor
         builder.AppendLine($"toc-lead-out-bytes: {(disc.TocLeadOutBytes?.ToString() ?? "none")}");
         builder.AppendLine($"md5: {disc.Md5}");
         builder.AppendLine($"sha256: {disc.Sha256}");
-        builder.AppendLine($"audio-pregap-assumption: {(disc.UsedStandardAudioPregap ? "150-frames-before-audio-index-01" : "index-01-only")}");
+        builder.AppendLine("track-boundaries: bytes 3-5 are the pregap MSF and bytes 7-9 are the user-data MSF. Track 1 starts at file sector 0. A later track starts at its pregap frame count minus track 1's origin.");
+        builder.AppendLine($"audio-pregap-in-later-tracks: {(disc.UsedStandardAudioPregap ? "150-frames" : "other")}");
         builder.AppendLine("note: hashes are of stored bytes only. They are not padded or repaired to match an external checksum.");
         foreach (var track in disc.Tracks)
         {
