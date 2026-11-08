@@ -119,6 +119,93 @@ public class PbpExtractTests
     }
 
     [TestMethod]
+    public void MeasuredTailGapIsNotPopstationBlockPadding()
+    {
+        const long leadOut = 583331280;
+        const long available = 582994944;
+        const int sector = 2352;
+        var missing = leadOut - available;
+
+        Assert.AreEqual(336336, missing);
+        Assert.AreEqual(143, missing / sector);
+        Assert.AreEqual(0, available % (16 * sector));
+        Assert.IsTrue(missing > 15 * sector);
+        Assert.IsTrue(538655040 < available);
+    }
+
+    [TestMethod]
+    public void BlockPaddingStillExtractsTheLeadOutWithoutThePaddingSectors()
+    {
+        using var workspace = new Workspace();
+        var image = BuildImage(40, 0);
+        var pbp = workspace.Pack(image, compressionLevel: 0, cue: OneTrackCue());
+        var output = Path.Combine(workspace.Root, "padded");
+
+        var report = new PbpImageExtractor().Extract(pbp, output, overwrite: false, discs: null);
+        var disc = report.Discs.Single();
+
+        Assert.IsTrue(disc.DiscComplete);
+        Assert.IsTrue(disc.AvailableBytes > disc.ClaimedBytes);
+        Assert.IsTrue(disc.AvailableBytes - disc.ClaimedBytes <= 15 * SectorSize);
+        CollectionAssert.AreEqual(image, File.ReadAllBytes(disc.BinPath));
+    }
+
+    [TestMethod]
+    public void LeadOutPastTheIndexWritesCompleteTracksAndLeavesTheMissingTail()
+    {
+        using var workspace = new Workspace();
+        var image = BuildImage();
+        var packed = workspace.Pack(image, compressionLevel: 5);
+        var pbp = Path.Combine(workspace.Root, "patched.pbp");
+        File.Copy(packed, pbp);
+        SetLeadOutSectors(pbp, DataSectors + AudioSectors + 143);
+        var before = File.ReadAllBytes(pbp);
+        var writeTime = File.GetLastWriteTimeUtc(pbp);
+
+        var output = Path.Combine(workspace.Root, "partial");
+        var report = new PbpImageExtractor().Extract(pbp, output, overwrite: false, discs: null);
+
+        CollectionAssert.AreEqual(before, File.ReadAllBytes(pbp));
+        Assert.AreEqual(writeTime, File.GetLastWriteTimeUtc(pbp));
+        var disc = report.Discs.Single();
+        Assert.IsFalse(disc.DiscComplete);
+        Assert.AreEqual(143 * SectorSize, disc.ClaimedBytes - disc.AvailableBytes);
+        Assert.IsFalse(File.Exists(Path.Combine(output, "patched.bin")));
+        Assert.IsFalse(File.Exists(Path.Combine(output, "patched (Track 02).bin")));
+
+        var track1 = disc.Tracks.Single(track => track.Number == 1);
+        var track2 = disc.Tracks.Single(track => track.Number == 2);
+        Assert.AreEqual("complete", track1.Status);
+        Assert.AreEqual((long)DataSectors * SectorSize, track1.Length);
+        Assert.AreEqual("incomplete", track2.Status);
+        Assert.AreEqual(143 * SectorSize, track2.MissingBytes);
+        Assert.AreEqual("", track2.Path);
+        CollectionAssert.AreEqual(image.AsSpan(0, (int)track1.Length).ToArray(), File.ReadAllBytes(track1.Path));
+        StringAssert.Contains(File.ReadAllText(disc.ReportPath), "disc-complete: false");
+        StringAssert.Contains(File.ReadAllText(disc.ReportPath), "missing-tail-sectors: 143");
+    }
+
+    [TestMethod]
+    public void LeadOutPastTheOnlyTrackWritesNothing()
+    {
+        using var workspace = new Workspace();
+        var image = BuildImage(40, 0);
+        var pbp = workspace.Pack(image, compressionLevel: 0, cue: OneTrackCue());
+        SetLeadOutSectors(pbp, 40 + 143);
+        var before = File.ReadAllBytes(pbp);
+        var output = Path.Combine(workspace.Root, "none");
+
+        var ex = Assert.ThrowsException<PbpFormatException>(() =>
+            new PbpImageExtractor().Extract(pbp, output, overwrite: false, discs: null));
+
+        StringAssert.Contains(ex.Message, "No track is fully stored");
+        StringAssert.Contains(ex.Message, "status=incomplete");
+        Assert.IsFalse(ex.IsProtected);
+        CollectionAssert.AreEqual(before, File.ReadAllBytes(pbp));
+        Assert.IsFalse(Directory.Exists(output) && Directory.EnumerateFiles(output).Any());
+    }
+
+    [TestMethod]
     public void FileThatIsNotAPbpIsRefused()
     {
         using var workspace = new Workspace();
@@ -173,9 +260,35 @@ public class PbpExtractTests
         StringAssert.Contains(File.ReadAllText(disc.ReportPath), "md5: " + disc.Md5);
     }
 
-    private static byte[] BuildImage()
+    private static string OneTrackCue()
     {
-        var total = DataSectors + AudioSectors;
+        return """
+            FILE "disc.bin" BINARY
+              TRACK 01 MODE2/2352
+                INDEX 01 00:00:00
+            """;
+    }
+
+    private static void SetLeadOutSectors(string path, int sectors)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var psar = BitConverter.ToInt32(bytes, 0x24);
+        var a2 = psar + 0x800 + 20;
+        var minutes = sectors / (75 * 60);
+        var remainder = sectors % (75 * 60);
+        var seconds = remainder / 75;
+        var frames = remainder % 75;
+        bytes[a2 + 7] = Bcd(minutes);
+        bytes[a2 + 8] = Bcd(seconds);
+        bytes[a2 + 9] = Bcd(frames);
+        File.WriteAllBytes(path, bytes);
+    }
+
+    private static byte Bcd(int value) => (byte)((value / 10) * 16 + (value % 10));
+
+    private static byte[] BuildImage(int dataSectors = DataSectors, int audioSectors = AudioSectors)
+    {
+        var total = dataSectors + audioSectors;
         var image = new byte[total * SectorSize];
         var random = new Random(12345);
         for (var sector = 0; sector < total; sector++)
@@ -190,8 +303,8 @@ public class PbpExtractTests
             image[offset + 11] = 0x00;
             image[offset + 15] = 0x02;
             random.NextBytes(image.AsSpan(offset + 24, 2048));
-            image[offset + 24] = sector == DataSectors - 1 ? (byte)0xD1
-                : sector == DataSectors ? (byte)0xA1
+            image[offset + 24] = sector == dataSectors - 1 ? (byte)0xD1
+                : sector == dataSectors ? (byte)0xA1
                 : sector == total - 1 ? (byte)0xA2
                 : (byte)0x5A;
         }
@@ -200,10 +313,10 @@ public class PbpExtractTests
         image[pvd] = 0x01;
         Encoding.ASCII.GetBytes("CD001").CopyTo(image, pvd + 1);
         image[pvd + 6] = 0x01;
-        image[pvd + 80] = (byte)DataSectors;
-        image[pvd + 81] = (byte)(DataSectors >> 8);
-        image[pvd + 82] = (byte)(DataSectors >> 16);
-        image[pvd + 83] = (byte)(DataSectors >> 24);
+        image[pvd + 80] = (byte)dataSectors;
+        image[pvd + 81] = (byte)(dataSectors >> 8);
+        image[pvd + 82] = (byte)(dataSectors >> 16);
+        image[pvd + 83] = (byte)(dataSectors >> 24);
         return image;
     }
 
@@ -253,12 +366,12 @@ public class PbpExtractTests
             Directory.CreateDirectory(Root);
         }
 
-        public string Pack(byte[] image, int compressionLevel)
+        public string Pack(byte[] image, int compressionLevel, string? cue = null)
         {
             var bin = Path.Combine(Root, "disc.bin");
-            var cue = Path.Combine(Root, "disc.cue");
+            var cuePath = Path.Combine(Root, "disc.cue");
             File.WriteAllBytes(bin, image);
-            File.WriteAllText(cue, """
+            File.WriteAllText(cuePath, cue ?? """
                 FILE "disc.bin" BINARY
                   TRACK 01 MODE2/2352
                     INDEX 01 00:00:00
@@ -279,7 +392,7 @@ public class PbpExtractTests
                         GameID = "TEST00001",
                         GameTitle = "Synth",
                         SourceIso = bin,
-                        SourceToc = cue
+                        SourceToc = cuePath
                     }
                 },
                 OutputPath = packed,

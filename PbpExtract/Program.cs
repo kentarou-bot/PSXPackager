@@ -8,6 +8,7 @@ internal static class Program
     private const int Error = 1;
     private const int Protected = 2;
     private const int Invalid = 3;
+    private const int Partial = 4;
 
     private static int Main(string[] args)
     {
@@ -66,7 +67,7 @@ internal static class Program
 
             var report = new PbpImageExtractor().Extract(input, output, overwrite, discs);
             Print(report);
-            return Ok;
+            return report.Discs.All(disc => disc.DiscComplete) ? Ok : Partial;
         }
         catch (PbpFormatException ex)
         {
@@ -106,23 +107,36 @@ internal static class Program
         Console.WriteLine("PbpExtract");
         Console.WriteLine($"source: {report.SourcePath}");
         Console.WriteLine($"source-bytes: {report.SourceLength}");
-        Console.WriteLine($"source-sha256: {report.SourceSha256}");
         Console.WriteLine($"source-unchanged: {report.SourceUnchanged}");
         foreach (var disc in report.Discs)
         {
-            Console.WriteLine($"disc {disc.Index} id={disc.DiscId} bytes={disc.BinLength} length-source={disc.LengthSource}");
-            Console.WriteLine($"  bin: {disc.BinPath}");
-            Console.WriteLine($"  md5: {disc.Md5}");
-            Console.WriteLine($"  sha256: {disc.Sha256}");
+            Console.WriteLine($"disc {disc.Index} id={disc.DiscId} disc-complete={(disc.DiscComplete ? "true" : "false")} available-bytes={disc.AvailableBytes} claimed-bytes={disc.ClaimedBytes}");
+            if (disc.DiscComplete)
+            {
+                Console.WriteLine($"  bin: {disc.BinPath}");
+                Console.WriteLine($"  bytes: {disc.BinLength}");
+                Console.WriteLine($"  md5: {disc.Md5}");
+                Console.WriteLine($"  sha256: {disc.Sha256}");
+            }
+            else
+            {
+                var missing = disc.ClaimedBytes - disc.AvailableBytes;
+                Console.WriteLine($"  full disc was not written. missing-tail-bytes={missing} missing-tail-sectors={missing / PbpImageExtractor.SectorSize}");
+            }
+
             foreach (var track in disc.Tracks)
             {
-                Console.WriteLine($"  track {track.Number} {track.Type} offset={track.Offset} bytes={track.Length} md5={track.Md5}");
+                Console.WriteLine($"  track {track.Number} {track.Status} {track.Type} offset={track.Offset} bytes={track.Length} covered={track.CoveredBytes} missing={track.MissingBytes} md5={track.Md5}");
+                if (!string.IsNullOrEmpty(track.Path))
+                {
+                    Console.WriteLine($"    path: {track.Path}");
+                }
             }
 
             Console.WriteLine($"  report: {disc.ReportPath}");
         }
 
-        Console.WriteLine("Hashes are the decompressed bytes. This tool does not pad or edit them to match another checksum.");
+        Console.WriteLine("Hashes are stored bytes only. This tool does not pad or edit them to match another checksum.");
     }
 
     private static string Help()
@@ -137,6 +151,8 @@ internal static class Program
         builder.AppendLine("Plain popstation PSISOIMG images are decompressed.");
         builder.AppendLine("Official PSOne Classics PBPs with a PGD-protected PSAR are refused.");
         builder.AppendLine("Output bytes are not padded or repaired to force an external checksum.");
+        builder.AppendLine("Exit 0 writes the full disc. Exit 4 writes only tracks whose bytes are fully stored");
+        builder.AppendLine("when the TOC lead-out is longer than the index. Exit 3 writes nothing.");
         builder.AppendLine();
         builder.AppendLine("Run this DLL with the signed Microsoft .NET runtime. There is no native apphost.");
         return builder.ToString();

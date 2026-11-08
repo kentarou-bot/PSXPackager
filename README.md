@@ -174,6 +174,8 @@ psxpackager -i <path_to_pbp> [-o <output_path>] [-d <list_of_discs>]
 
 The input file is opened read-only. Official PSOne Classics packages that carry a PGD marker in `DATA.PSAR` are refused. Those images are protected; this tool does not decrypt them and does not pad or rebuild sectors to match an external checksum.
 
+If the TOC lead-out is longer than the indexed blocks, the missing tail is not stored. That is different from normal popstation padding, which makes the index longer than the lead-out by at most 15 sectors. In the short-index case the full disc is not written. Each track whose bytes are entirely inside the index is written on its own, and the report marks the disc incomplete. A track that runs past the index is left unwritten. Exit code 4 means those complete tracks were written. Exit code 0 is only a full disc.
+
 ```
 dotnet PbpExtract.dll --input <file.pbp> --output <directory>
 ```
